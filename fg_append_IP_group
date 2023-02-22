@@ -1,0 +1,148 @@
+import ipaddress
+from ipaddress import IPv4Network, AddressValueError
+import netaddr
+import requests
+import urllib3
+
+urllib3.disable_warnings()
+
+GREEN = '\033[32m'
+YELLOW = '\033[33m'
+RED = '\033[31m'
+RESET = '\033[0m'
+
+operator = input("Enter Operator name\n")
+print("Paste IP addresses one at a line\n quit/exit/q to end pasting")
+do_you_want_to_whitelist = ""
+our_ips = []
+
+while True:
+    userInput = input()
+    if userInput == "quit" or userInput == "exit" or userInput == "q":
+        break
+    try:
+        if ipaddress.IPv4Network(userInput):
+            if "/" not in userInput:
+                our_ips.append(userInput + "/32")
+            elif "/" in userInput:
+                our_ips.append((userInput))
+    except ValueError:
+        print("Enter valid ip address a.b.c.d or a.b.c.d/xy or quit/exit/q to continue")
+        continue
+token = "" # here enter desired token
+token_sf = "" # here enter desired token
+firewall_ip = "" #enter ip of first FW
+firewall_ip_sof="" #enter ip of second FW disaster recovery
+print(our_ips)
+FORTI = f"https://{firewall_ip}/api/v2/cmdb/firewall/addrgrp/Providers?access_token={token}"
+session_resp = requests.get(FORTI, verify=False)
+
+b = session_resp.json()
+
+kur1 = []
+kur2 = []
+for doker1 in b['results'][0]['member']:
+    c = doker1["name"]
+
+    if c.find("/") != -1:
+        kur1.append(doker1["name"])
+        d = c.replace("/", "%2F")
+
+        br0p = requests.get(
+            f'https://{firewall_ip}/api/v2/cmdb/firewall/address/{d}?access_token={token}&format=subnet|fqdn|start-ip|end-ip',
+            verify=False)
+
+        br0p_json = br0p.json()
+        if "subnet" in br0p.text:
+            kur2.append(br0p_json['results'][0]['subnet'])
+        elif "fqdn" in br0p.text:
+            kur2.append(br0p_json['results'][0]['fqdn'])
+        else:
+            kur2.append(br0p_json['results'][0]['start-ip'] + "-" + br0p_json['results'][0]['end-ip'])
+    else:
+        kur1.append(doker1["name"])
+        br0p = requests.get(
+            f'https://{firewall_ip}/api/v2/cmdb/firewall/address/{c}?access_token={token}&format=subnet|fqdn|start-ip|end-ip',
+            verify=False)
+        br0p_json = br0p.json()
+        if "subnet" in br0p.text:
+            kur2.append(br0p_json['results'][0]['subnet'])
+        elif "fqdn" in br0p.text:
+            kur2.append(br0p_json['results'][0]['fqdn'])
+        else:
+            kur2.append(br0p_json['results'][0]['start-ip'] + "-" + br0p_json['results'][0]['end-ip'])
+compare_list = []
+for mask in kur2:
+    try:
+        if "-" not in mask:
+            cidr = mask.replace(" ", "/")
+            mask_length = IPv4Network(cidr).prefixlen
+            mask = mask.split(" ", 1)[0]
+            compare_list.append(f"{mask}/{mask_length}")
+        elif "-" in mask:
+            c1 = mask.split("-", 1)[0]
+            c2 = mask.split("-", 1)[1]
+            cidrs = netaddr.iprange_to_cidrs(c1, c2)
+            for k in cidrs:
+                compare_list.append(k)
+    except AddressValueError:
+        continue
+print(compare_list)
+wanted_to_whitelist = []
+
+
+# FUNCTION TO CREATE ADDRESS BELOW
+
+def create_addr_function(provider, subnet, token_1,firewall):
+    FORTI21 = f"https://{firewall}/api/v2/cmdb/firewall/address?access_token={token_1}"
+    body1 = {
+        "name": provider + "-" + subnet,
+        "subnet": subnet,
+        "type": "ipmask",
+    }
+    headers1 = {'Content-type': 'application/json', 'accept': 'application/json'}
+    response = requests.post(FORTI21, json=body1, headers=headers1, verify=False)
+    print(f"{GREEN}{provider}-{subnet} is created{RESET}")
+    return response
+
+
+# FUNCTION TO CREATE ADDRESS ABOVE
+# FUNCTION TO ADD TO GROUP BELOW
+def add_to_fw_rule(operators1,firewall,token2):
+    FORTI2 = f"https://{firewall}/api/v2/cmdb/firewall/addrgrp/Providers/member?vdom=root&format=name|member"
+    headers1 = {'accept': 'application/json', 'Authorization': 'Bearer ' + token2}
+    body1 = [{'name': op} for op in operators1]  # [{'name': op} for op in operators]
+    response = requests.post(FORTI2, json=body1, headers=headers1, verify=False)
+    print(response.text)
+    return response
+
+
+# Function to add to group above
+for ip1 in our_ips:
+    flag = True
+    for jip1 in compare_list:
+        if netaddr.IPNetwork(ip1) in netaddr.IPNetwork(jip1):
+            print(f"{RED}{ip1} is in network {jip1}{RESET}")
+            flag = False
+            break
+    if flag:
+        wanted_to_whitelist.append(ip1)
+
+names_to_whitelist = []
+for v1 in wanted_to_whitelist:
+    names_to_whitelist.append(operator + "-" + v1)
+
+while 1:
+    if wanted_to_whitelist:
+        do_you_want_to_whitelist = input(f"{YELLOW}Whitelist these IPs {wanted_to_whitelist} for {operator}?? y/n{RESET}\n\n")
+    if do_you_want_to_whitelist == "y":
+        for counter in wanted_to_whitelist:
+            create_addr_function(operator, counter, token,firewall_ip)
+            create_addr_function(operator, counter, token_sf,firewall_ip_sof)
+        add_to_fw_rule(names_to_whitelist,firewall_ip,token)
+        add_to_fw_rule(names_to_whitelist,firewall_ip_sof,token_sf)
+        break
+
+    else:
+        print(RED+"Nothing was whitelisted"+RESET)
+        break
